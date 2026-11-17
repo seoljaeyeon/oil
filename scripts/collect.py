@@ -6,6 +6,7 @@
 결과: data/prices.json, data/stations.json
 """
 import json
+import math
 import os
 import sys
 import urllib.parse
@@ -16,8 +17,40 @@ BASE = "https://www.opinet.co.kr/api/"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data", "prices.json")
 STATIONS = os.path.join(ROOT, "data", "stations.json")
-# 오피넷 좌표(KATEC) → 위경도(WGS84)
-KATEC = "+proj=tmerc +lat_0=38 +lon_0=128 +k=0.9999 +x_0=400000 +y_0=600000 +ellps=bessel +units=m +towgs84=-115.80,474.99,674.11,1.16,-2.31,-1.63,6.43 +no_defs"
+
+
+# 오피넷 좌표(KATEC) → 위경도(WGS84). 외부 라이브러리 없이 계산 (pyproj와 결과 동일 확인)
+def katec_to_wgs84(x, y):
+    # 1) TM 역변환 (Bessel 타원체, 원점 38N 128E, k=0.9999, 가산 400000/600000)
+    a=6377397.155; f=1/299.1528128; e2=f*(2-f); ep2=e2/(1-e2)
+    k0=0.9999; lat0=math.radians(38); lon0=math.radians(128); x0=400000.0; y0=600000.0
+    def M(phi):
+        return a*((1-e2/4-3*e2**2/64-5*e2**3/256)*phi-(3*e2/8+3*e2**2/32+45*e2**3/1024)*math.sin(2*phi)
+                  +(15*e2**2/256+45*e2**3/1024)*math.sin(4*phi)-(35*e2**3/3072)*math.sin(6*phi))
+    m=M(lat0)+(y-y0)/k0
+    mu=m/(a*(1-e2/4-3*e2**2/64-5*e2**3/256))
+    e1=(1-math.sqrt(1-e2))/(1+math.sqrt(1-e2))
+    phi1=(mu+(3*e1/2-27*e1**3/32)*math.sin(2*mu)+(21*e1**2/16-55*e1**4/32)*math.sin(4*mu)
+          +(151*e1**3/96)*math.sin(6*mu)+(1097*e1**4/512)*math.sin(8*mu))
+    s1,c1,t1=math.sin(phi1),math.cos(phi1),math.tan(phi1)
+    C1=ep2*c1**2; T1=t1**2; N1=a/math.sqrt(1-e2*s1**2); R1=a*(1-e2)/(1-e2*s1**2)**1.5
+    D=(x-x0)/(N1*k0)
+    lat=phi1-(N1*t1/R1)*(D**2/2-(5+3*T1+10*C1-4*C1**2-9*ep2)*D**4/24+(61+90*T1+298*C1+45*T1**2-252*ep2-3*C1**2)*D**6/720)
+    lon=lon0+(D-(1+2*T1+C1)*D**3/6+(5-2*C1+28*T1-3*C1**2+8*ep2+24*T1**2)*D**5/120)/c1
+    # 2) Bessel → 지구중심 좌표
+    N=a/math.sqrt(1-e2*math.sin(lat)**2)
+    X=N*math.cos(lat)*math.cos(lon); Y=N*math.cos(lat)*math.sin(lon); Z=N*(1-e2)*math.sin(lat)
+    # 3) 7변수 변환 (towgs84 -115.80,474.99,674.11,1.16,-2.31,-1.63,6.43, 위치벡터 방식)
+    sec=math.pi/(180*3600)
+    dx,dy,dz=-115.80,474.99,674.11; rx,ry,rz=1.16*sec,-2.31*sec,-1.63*sec; s=6.43e-6
+    X2=dx+(1+s)*(X-rz*Y+ry*Z); Y2=dy+(1+s)*(rz*X+Y-rx*Z); Z2=dz+(1+s)*(-ry*X+rx*Y+Z)
+    # 4) 지구중심 → WGS84 위경도
+    a2=6378137.0; f2=1/298.257223563; e22=f2*(2-f2)
+    lon2=math.atan2(Y2,X2); p=math.hypot(X2,Y2); lat2=math.atan2(Z2,p*(1-e22))
+    for _ in range(6):
+        N2=a2/math.sqrt(1-e22*math.sin(lat2)**2); lat2=math.atan2(Z2+e22*N2*math.sin(lat2),p)
+    return math.degrees(lat2), math.degrees(lon2)
+
 KST = timezone(timedelta(hours=9))
 FUELS = {"B027": "휘발유", "D047": "경유", "B034": "고급휘발유", "K015": "LPG", "C004": "등유"}
 
@@ -110,8 +143,6 @@ def main():
 
 
 def collect_stations(cfg, regions, now):
-    from pyproj import Transformer
-    tr = Transformer.from_crs(KATEC, "EPSG:4326", always_xy=True)
     fuels = list(dict.fromkeys([cfg.get("fuel", "B027"), "B027", "D047"]))
     areas = []
     for want in cfg.get("station_regions", [cfg.get("region", "전북")]):
@@ -143,7 +174,7 @@ def collect_stations(cfg, regions, now):
                     continue
                 st = stations.get(uid)
                 if not st:
-                    lng, lat = tr.transform(x, y)
+                    lat, lng = katec_to_wgs84(x, y)
                     st = stations[uid] = {
                         "id": uid, "name": r.get("OS_NM"), "area": area_nm,
                         "addr": r.get("NEW_ADR") or r.get("VAN_ADR") or "",
