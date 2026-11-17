@@ -1,5 +1,6 @@
 {
   "region": "전북",
   "fuel": "B027",
-  "cheapest_count": 10
+  "cheapest_count": 10,
+  "station_regions": ["전북"]
 }

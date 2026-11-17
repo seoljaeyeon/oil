@@ -2,7 +2,8 @@
 
 - 시도별 평균가격(avgSidoPrice.do): 모든 시도·모든 유종을 받아 날짜별로 쌓음
 - 지역 최저가 주유소(lowTop10.do): config.json의 지역에서 싼 주유소 목록 (실패하면 건너뜀)
-결과: data/prices.json
+- 내 주변 주유소용: config.json의 station_regions(예: 전북) 시·군별 싼 주유소를 좌표와 함께 모음
+결과: data/prices.json, data/stations.json
 """
 import json
 import os
@@ -14,6 +15,9 @@ from datetime import datetime, timedelta, timezone
 BASE = "https://www.opinet.co.kr/api/"
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DATA = os.path.join(ROOT, "data", "prices.json")
+STATIONS = os.path.join(ROOT, "data", "stations.json")
+# 오피넷 좌표(KATEC) → 위경도(WGS84)
+KATEC = "+proj=tmerc +lat_0=38 +lon_0=128 +k=0.9999 +x_0=400000 +y_0=600000 +ellps=bessel +units=m +towgs84=-115.80,474.99,674.11,1.16,-2.31,-1.63,6.43 +no_defs"
 KST = timezone(timedelta(hours=9))
 FUELS = {"B027": "휘발유", "D047": "경유", "B034": "고급휘발유", "K015": "LPG", "C004": "등유"}
 
@@ -92,11 +96,68 @@ def main():
         db["cheapest"] = cheapest
         db["cheapest_region"] = region
 
+    # 3) 내 주변 주유소용 목록 (시·군별 싼 주유소 + 좌표)
+    try:
+        collect_stations(cfg, db["regions"], now)
+    except Exception as e:
+        print(f"주변 주유소 수집 건너뜀: {e}")
+
     db["updated"] = now.strftime("%Y-%m-%d %H:%M")
     os.makedirs(os.path.dirname(DATA), exist_ok=True)
     with open(DATA, "w", encoding="utf-8") as f:
         json.dump(db, f, ensure_ascii=False, separators=(",", ":"))
     print(f"{today}: 시도 {len(day)}곳, 최저가 주유소 {len(cheapest)}곳 저장")
+
+
+def collect_stations(cfg, regions, now):
+    from pyproj import Transformer
+    tr = Transformer.from_crs(KATEC, "EPSG:4326", always_xy=True)
+    fuels = list(dict.fromkeys([cfg.get("fuel", "B027"), "B027", "D047"]))
+    areas = []
+    for want in cfg.get("station_regions", [cfg.get("region", "전북")]):
+        sido = next((c for n, c in regions.items() if want in n), None)
+        if not sido:
+            continue
+        try:  # 시·군 코드 (4자리)
+            subs = call("areaCode.do", area=sido)
+            codes = [(str(a.get("AREA_CD")), str(a.get("AREA_NM"))) for a in subs if a.get("AREA_CD")]
+        except Exception as e:
+            print(f"{want} 시·군 코드 못 받음, 도 전체로 검색: {e}")
+            codes = []
+        areas += codes or [(sido, want)]
+    stations = {}
+    calls = 0
+    for code, area_nm in areas:
+        for prod in fuels:
+            try:
+                rows = call("lowTop10.do", prodcd=prod, area=code, cnt=20)
+                calls += 1
+            except Exception as e:
+                print(f"{area_nm} {prod} 건너뜀: {e}")
+                continue
+            for r in rows:
+                uid = r.get("UNI_ID")
+                x, y = num(r.get("GIS_X_COOR")), num(r.get("GIS_Y_COOR"))
+                price = num(r.get("PRICE"))
+                if not uid or x is None or y is None or price is None:
+                    continue
+                st = stations.get(uid)
+                if not st:
+                    lng, lat = tr.transform(x, y)
+                    st = stations[uid] = {
+                        "id": uid, "name": r.get("OS_NM"), "area": area_nm,
+                        "addr": r.get("NEW_ADR") or r.get("VAN_ADR") or "",
+                        "brand": r.get("POLL_DIV_CD") or r.get("POLL_DIV_CO") or "",
+                        "lat": round(lat, 6), "lng": round(lng, 6), "p": {},
+                    }
+                st["p"][prod] = price
+    if not stations:
+        print("주변 주유소: 받은 데이터 없음 (기존 파일 유지)")
+        return
+    out = {"updated": now.strftime("%Y-%m-%d %H:%M"), "count": len(stations), "stations": list(stations.values())}
+    with open(STATIONS, "w", encoding="utf-8") as f:
+        json.dump(out, f, ensure_ascii=False, separators=(",", ":"))
+    print(f"주변 주유소 {len(stations)}곳 저장 (API {calls}회)")
 
 
 if __name__ == "__main__":
