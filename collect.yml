@@ -17,6 +17,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: 좌표 변환 라이브러리 설치
+        run: pip install pyproj
       - name: 오피넷에서 가격 받기
         env:
           OPINET_KEY: ${{ secrets.OPINET_KEY }}
